@@ -1,10 +1,21 @@
 import express from 'express';
 const router = express.Router();
-import { getFlightOptions } from '../controllers/transportController.js';
+import { getFlightOptions, searchFlights } from '../controllers/transportController.js';
 
-// @desc    Get flight options for an airport
-// @route   GET /api/transport/flights/:airportCode
-// @access  Public (or Private, add authMiddleware if needed)
+// Original route for single airport flights
 router.route('/flights/:airportCode').get(getFlightOptions);
+
+// New route for searching flights between airports
+router.route('/flights').post(searchFlights);
+
+// Add this route if missing
+router.get('/places/autocomplete', async (req, res) => {
+  try {
+    // Your implementation here
+    res.json({ predictions: [] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 export default router;
