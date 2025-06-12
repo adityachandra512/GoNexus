@@ -1,11 +1,15 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import fetch from 'node-fetch';
+import { v4 as uuidv4 } from 'uuid';
 
 // Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // Fallback station code mapping for major Indian cities
 const stationMapping = {
+  'mumbai': 'CSMT',
+  'delhi': 'NDLS',
+  'new delhi': 'NDLS',
   'bangalore': 'SBC',
   'bengaluru': 'SBC',
   'chennai': 'MAS',
@@ -79,74 +83,148 @@ const convertCityToStationCode = async (cityName) => {
   return null;
 };
 
-// Fetch real train data from API
+// ConfirmTKT API integration for real train fares
 const fetchTrainData = async (srcCode, dstCode, date) => {
   try {
-    console.log(`Searching trains: ${srcCode} → ${dstCode} on ${date}`);
+    console.log(`Searching trains via ConfirmTKT: ${srcCode} → ${dstCode} on ${date}`);
     
-    const response = await fetch('https://traininfo-diik.onrender.com/search', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    const url = "https://cttrainsapi.confirmtkt.com/api/v1/trains/search";
+    const params = new URLSearchParams({
+      "sourceStationCode": srcCode,
+      "destinationStationCode": dstCode,
+      "addAvailabilityCache": "true",
+      "excludeMultiTicketAlternates": "false",
+      "excludeBoostAlternates": "false",
+      "sortBy": "DEFAULT",
+      "dateOfJourney": date,
+      "enableNearby": "true",
+      "enableTG": "true",
+      "tGPlan": "CTG-3",
+      "showTGPrediction": "false",
+      "tgColor": "DEFAULT",
+      "showPredictionGlobal": "true"
+    });
+
+    // Randomized headers to avoid detection
+    const userAgents = [
+      {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "sec-ch-ua": '"Google Chrome";v="122", "Chromium";v="122", "Not.A/Brand";v="24"',
+        "sec-ch-ua-platform": '"Windows"'
       },
-      body: JSON.stringify({
-        src: srcCode,
-        dst: dstCode,
-        date: date,
-      })
+      {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+        "sec-ch-ua": '"Chromium";v="137", "Not/A)Brand";v="24"',
+        "sec-ch-ua-platform": '"macOS"'
+      }
+    ];
+    
+    const selectedUA = userAgents[Math.floor(Math.random() * userAgents.length)];
+    
+    const headers = {
+      "Accept": "*/*",
+      "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+      "ApiKey": "ct-web!2$",
+      "ClientId": "ct-web",
+      "Content-Type": "application/json",
+      "DNT": "1",
+      "DeviceId": uuidv4(),
+      "Origin": "https://www.confirmtkt.com",
+      "Referer": "https://www.confirmtkt.com/",
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-site",
+      "sec-ch-ua-mobile": "?0",
+      ...selectedUA
+    };
+
+    const response = await fetch(`${url}?${params}`, {
+      method: 'GET',
+      headers,
+      timeout: 15000
     });
 
     if (!response.ok) {
-      throw new Error(`Train API error: ${response.status}`);
+      throw new Error(`ConfirmTKT API error: ${response.status}`);
     }
 
     const data = await response.json();
-    console.log('Full API response:', JSON.stringify(data, null, 2));
+    console.log('ConfirmTKT API success - Found trains with real fares');
     
-    // Fix: API returns trains directly, not in data.trainList
-    const trainList = data.trains || []; // Changed from data.data?.trainList
-    console.log(`Found ${trainList.length} trains`);
+    const trainList = data.data?.trainList || [];
+    console.log(`Processed ${trainList.length} trains with ConfirmTKT fares`);
     
     return {
       success: true,
       trains: trainList,
-      count: trainList.length
+      count: trainList.length,
+      source: 'ConfirmTKT'
     };
   } catch (error) {
-    console.error('Train API failed:', error.message);
+    console.error('ConfirmTKT API failed:', error.message);
+    
+    // Fallback to original API
+    try {
+      console.log('Trying fallback train API...');
+      const fallbackResponse = await fetch('https://traininfo-diik.onrender.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ src: srcCode, dst: dstCode, date: date })
+      });
+
+      if (fallbackResponse.ok) {
+        const fallbackData = await fallbackResponse.json();
+        const fallbackTrains = fallbackData.data?.trainList || fallbackData.trains || [];
+        console.log(`Fallback API returned ${fallbackTrains.length} trains`);
+        
+        return {
+          success: true,
+          trains: fallbackTrains,
+          count: fallbackTrains.length,
+          source: 'Fallback',
+          fallback: true
+        };
+      }
+    } catch (fallbackError) {
+      console.error('Fallback API also failed:', fallbackError.message);
+    }
+    
     return { success: false, error: error.message };
   }
 };
 
-// Convert train data for frontend display
-const formatTrainData = (trains) => {
-  return trains.slice(0, 10).map((train, index) => ({
-    service: train.trainName,
-    trainNumber: train.trainNumber,
-    price: getLowestFare(train.availability), // Use availability, not availabilityCache
-    duration: formatDuration(train.duration),
-    rating: 4.5,
-    features: ['Reserved Seating', 'Onboard Catering', 'AC Coaches'],
-    availability: train.availability, // Use availability
-    popular: index === 0,
-    eco: true,
-    departureTime: train.departureTime,
-    arrivalTime: train.arrivalTime,
-    distance: train.distance
-  }));
+// Format train data with real ConfirmTKT fares
+const formatTrainData = (trains, source = 'ConfirmTKT') => {
+  return trains.slice(0, 10).map((train, index) => {
+    console.log(`Processing ${source} train:`, train.trainName, 'with availability:', Object.keys(train.availabilityCache || {}));
+    
+    return {
+      service: train.trainName,
+      trainNumber: train.trainNumber,
+      price: getLowestFareFromCache(train.availabilityCache || train.availability),
+      duration: formatDuration(train.duration),
+      rating: 4.5,
+      features: ['Reserved Seating', 'Onboard Catering', 'AC Coaches'],
+      availability: train.availabilityCache || train.availability,
+      popular: index === 0,
+      eco: true,
+      departureTime: train.departureTime,
+      arrivalTime: train.arrivalTime,
+      distance: train.distance,
+      source: source
+    };
+  });
 };
 
-// Helper function to get lowest fare - fixed for correct API structure
-const getLowestFare = (availability) => {
-  if (!availability || typeof availability !== 'object') return '₹500';
+// Extract real fares from ConfirmTKT response
+const getLowestFareFromCache = (availabilityCache) => {
+  if (!availabilityCache || typeof availabilityCache !== 'object') return '₹500';
   
-  const fares = Object.values(availability)
+  const fares = Object.values(availabilityCache)
     .map(item => {
-      // Handle availability strings like "CURR_AVBL-0043", "GNWL111/WL48", "AVAILABLE-0010"
-      if (typeof item === 'string') {
-        // Try to extract number from availability status (not fare, as fare is not in this API)
-        const fareMatch = item.match(/\d+/);
-        return fareMatch ? parseInt(fareMatch[0]) * 10 : 500; // Multiply by 10 for realistic price
+      // ConfirmTKT structure: { "availability": "AVAILABLE-25", "fare": "850", "tatkal": "1050" }
+      if (typeof item === 'object' && item.fare) {
+        return parseInt(item.fare) || 500;
       }
       return 500;
     })
@@ -176,9 +254,9 @@ export const planTrip = async (req, res) => {
       });
     }
 
-    console.log(`Planning trip: ${origin} → ${destination} on ${startDate}`);
+    console.log(`Planning trip with ConfirmTKT API: ${origin} → ${destination} on ${startDate}`);
 
-    // Step 1: Convert cities to station codes (fallback first, then Gemini)
+    // Step 1: Convert cities to station codes
     const [originStationCode, destStationCode] = await Promise.all([
       convertCityToStationCode(origin),
       convertCityToStationCode(destination)
@@ -186,7 +264,7 @@ export const planTrip = async (req, res) => {
 
     console.log('Station codes:', { originStationCode, destStationCode });
 
-    // Step 2: Get train data if both station codes found
+    // Step 2: Get real train data with fares from ConfirmTKT
     let trainOptions = [];
     
     if (originStationCode && destStationCode) {
@@ -197,8 +275,12 @@ export const planTrip = async (req, res) => {
       );
 
       if (trainResult.success && trainResult.trains.length > 0) {
-        trainOptions = formatTrainData(trainResult.trains);
-        console.log(`Successfully processed ${trainResult.trains.length} trains`);
+        trainOptions = formatTrainData(trainResult.trains, trainResult.source);
+        console.log(`Successfully processed ${trainResult.trains.length} trains from ${trainResult.source}`);
+        
+        if (trainResult.fallback) {
+          trainOptions[0].features = ['Fallback Data - Limited Fares', ...trainOptions[0].features];
+        }
       } else {
         trainOptions = [{
           service: 'No trains found for this route',
@@ -224,7 +306,7 @@ export const planTrip = async (req, res) => {
       }];
     }
 
-    // Step 3: Return complete response
+    // Return response with real train fare data
     res.json({
       success: true,
       tripData: {
